@@ -1,5 +1,5 @@
 {
     "hal": "HAL",
-    "fde": "Full Disk Encryption",
+    "disk": "Disk-Backed HAL",
     "cloud": "Cloud Environments"
 }

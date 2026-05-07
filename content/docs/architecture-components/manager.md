@@ -6,7 +6,7 @@ title: Manager
 
 The Manager is a critical component of the Cocos system that runs on TEE-capable hosts (AMD SEV-SNP or Intel TDX) and serves as the orchestrator for Trusted Execution Environment (TEE) deployments. It acts as the bridge between the Computation Management service and the actual TEE instances, providing secure virtualized environments for confidential computing workloads.
 
-In the current Cocos implementation, the Manager supports both the original RAM-only EOS boot path and the newer full disk encryption (FDE) workflow. In the FDE flow, the Manager still boots a kernel and initramfs directly, but it can also provision a fresh writable block device for each CVM so the early userspace code can install an encrypted root filesystem before handing control to the guest OS.
+The Manager supports both the original RAM-only EOS boot path and the newer disk-backed HAL workflow. In disk mode, the Manager boots from an attached disk image instead of passing a kernel and initramfs directly to QEMU.
 
 ### Architecture Position
 
@@ -27,7 +27,8 @@ The Manager has three primary operational roles:
   - Runtime parameters
   - Environment variables
 - **Resource Allocation**: Manages CPU, memory, and storage resources for each TEE instance
-- **Boot Mode Selection**: Launches either the traditional in-memory EOS or an FDE-oriented initramfs and disk-backed flow, depending on the configured artifacts and disk settings
+- **Boot Mode Selection**: Launches either the traditional in-memory EOS or a
+  disk-backed HAL flow, depending on the configured artifacts and disk settings
 
 ### 2. TEE Monitoring and Lifecycle Management
 
@@ -36,12 +37,18 @@ The Manager has three primary operational roles:
 - **Lifecycle Management**: Handles TEE startup, runtime management, and shutdown procedures
 - **Attestation**: Performs vTPM-based attestation and IGVM validation for security assurance
 
-### 3. FDE-Oriented Disk Provisioning
+### 3. Disk-Backed VM Provisioning
 
-- **Per-VM Writable Disk Creation**: When disk support is enabled, the Manager creates a unique writable qcow2 disk for each CVM
-- **Disk Sizing**: Uses a reference qcow2 image to determine the destination disk size and adds extra capacity for LUKS metadata
-- **Device Attachment**: Attaches the writable disk to QEMU through a virtio-scsi controller
-- **Runtime Cleanup**: Removes the per-VM writable disk and temporary firmware state after the CVM stops
+- **Per-VM Disk Creation**: When disk support is enabled, the Manager creates a
+  unique qcow2 disk for each CVM
+- **Disk Sizing**: Uses a reference qcow2 image to determine the runtime disk
+  size and adds extra capacity
+- **Device Attachment**: Attaches the disk to QEMU through a virtio-scsi
+  controller
+- **Boot Source Selection**: In disk mode, QEMU boots from the attached disk
+  instead of using `-kernel` and `-initrd`
+- **Runtime Cleanup**: Removes the per-VM disk and temporary firmware state
+  after the CVM stops
 
 ### Security Features
 
@@ -59,15 +66,21 @@ The Manager has three primary operational roles:
 - Ensures CVM initial state aligns with security expectations
 - Prevents unauthorized modifications and ensures secure boot
 
-#### FDE Boot Flow
+#### Disk-Backed Boot Flow
 
-In the FDE workflow, the Manager participates in the boot chain as follows:
+In the disk-backed workflow, the Manager participates in the boot chain as
+follows:
 
-1. A trusted Ubuntu source image is prepared ahead of time with the `hal/cloud-init` workflow.
-2. The source image is exported read-only over NBD for the early boot environment to consume.
-3. The Manager boots a specialized kernel and initramfs and, when enabled, attaches a fresh writable qcow2 destination disk for that VM.
-4. The FDE initramfs connects to the NBD source image, copies it into the writable destination disk, formats the destination as LUKS2, measures the copied disk, and switches root into the encrypted filesystem.
-5. When the VM is removed, the Manager cleans up the temporary writable disk it created for that CVM.
+1. A bootable disk image is prepared ahead of time with the HAL workflow under
+   `cocos/hal/disk`.
+2. When disk support is enabled, the Manager creates a runtime qcow2 disk from
+   a reference image and attaches it to the VM.
+3. QEMU boots from that attached disk through firmware rather than through
+   direct `-kernel` and `-initrd` arguments.
+4. The guest initramfs mounts the real root filesystem read-only, provisions the
+   encrypted `/cocos` partition, and switches into the installed system.
+5. When the VM is removed, the Manager cleans up the runtime disk it created for
+   that CVM.
 
 ## Prerequisites and Setup
 
@@ -105,16 +118,17 @@ wget https://github.com/ultravioletrs/cocos/releases/download/v0.6.0/bzImage -P 
 wget https://github.com/ultravioletrs/cocos/releases/download/v0.6.0/rootfs.cpio.gz -P cocos/cmd/manager/img
 ```
 
-Required files:
+Required files for direct kernel boot:
 
 - `rootfs.cpio.gz`: Initial RAM filesystem (initramfs) for the CVM
 - `bzImage`: Linux kernel image
 
-For FDE-enabled deployments, these two boot artifacts are still used, but they typically come from the FDE-focused Buildroot workflow under `cocos/hal/cloud-init/buildroot` rather than the minimal RAM-only EOS build. In addition, the FDE flow relies on a separately prepared Ubuntu source image and an NBD export of that image during early boot.
+The runtime image comes from the HAL workflow under `cocos/hal/disk`, and QEMU boots from that disk artifact through firmware.
 
-Optional FDE-related artifact:
+Optional disk-mode artifact:
 
-- `enc_os.qcow2`: Reference qcow2 image used to size the per-VM writable destination disk when disk support is enabled; the actual source-image copy step is performed separately by the FDE initramfs over NBD
+- `enc_os.qcow2`: reference qcow2 image used to size the per-VM runtime disk
+  when disk support is enabled
 
 ### OVMF Configuration
 
@@ -250,17 +264,18 @@ The Manager's behavior is controlled through environment variables. Below is a c
 
 | Variable                            | Description                                                                                                         | Default Value      |
 |-------------------------------------|---------------------------------------------------------------------------------------------------------------------|--------------------|
-| `MANAGER_QEMU_DISK_IMG_KERNEL_FILE` | Kernel image file path                                                                                              | img/bzImage        |
-| `MANAGER_QEMU_DISK_IMG_ROOTFS_FILE` | Root filesystem image file path                                                                                     | img/rootfs.cpio.gz |
-| `MANAGER_QEMU_KERNEL_CMDLINE`       | Kernel command line. In FDE mode, this commonly includes `src_ip` and optional `src_port` for the NBD source image. | quiet console=null |
-| `MANAGER_QEMU_ENABLE_DISK`          | Enable creation and attachment of a writable per-VM qcow2 destination disk                                          | false              |
-| `MANAGER_QEMU_SRC_DISK_FILE`        | Reference qcow2 image whose virtual size is used when sizing the destination disk                                   | img/enc_os.qcow2   |
-| `MANAGER_QEMU_DST_DISK_FILE`        | Runtime path for the per-VM writable destination disk                                                               | (empty)            |
-| `MANAGER_QEMU_DISK_ID`              | QEMU drive identifier for the attached writable disk                                                                | disk0              |
-| `MANAGER_QEMU_DISK_FORMAT`          | Disk image format for the writable destination disk                                                                 | qcow2              |
+| `MANAGER_QEMU_DISK_IMG_KERNEL_FILE` | Kernel image file path used for direct kernel boot                                                                  | img/bzImage        |
+| `MANAGER_QEMU_DISK_IMG_ROOTFS_FILE` | Initramfs image file path used for direct kernel boot                                                               | img/rootfs.cpio.gz |
+| `MANAGER_QEMU_KERNEL_CMDLINE`       | Kernel command line used for direct kernel boot                                                                     | quiet console=null |
+| `MANAGER_QEMU_ENABLE_DISK`          | Enable disk boot and attach a per-VM qcow2 disk                                                                     | false              |
+| `MANAGER_QEMU_SRC_DISK_FILE`        | Reference qcow2 image whose virtual size is used when sizing the runtime disk                                       | img/enc_os.qcow2   |
+| `MANAGER_QEMU_DST_DISK_FILE`        | Runtime path for the per-VM disk image                                                                              | (empty)            |
+| `MANAGER_QEMU_DISK_ID`              | QEMU drive identifier for the attached disk                                                                         | disk0              |
+| `MANAGER_QEMU_DISK_FORMAT`          | Disk image format for the runtime disk                                                                              | qcow2              |
 | `MANAGER_QEMU_DISK_SCSI_ID`         | virtio-scsi controller identifier used for the attached disk                                                        | scsi0              |
 
-`MANAGER_QEMU_DST_DISK_FILE` is usually left unset. The Manager fills it with a unique `/tmp/cvmDisk-<uuid>.qcow2` path at runtime.
+`MANAGER_QEMU_DST_DISK_FILE` is usually left unset. The Manager fills it with a
+unique `/tmp/cvmDisk-<uuid>.qcow2` path at runtime.
 
 #### File System Mounts
 
@@ -347,7 +362,7 @@ export MANAGER_GRPC_CLIENT_KEY=/path/to/client.key
 export MANAGER_GRPC_SERVER_CA_CERTS=/path/to/ca.crt
 ```
 
-#### FDE Disk-Backed Setup
+#### Disk-Backed Setup
 
 ```bash
 export MANAGER_GRPC_HOST=<HOST_IP>
@@ -355,9 +370,6 @@ export MANAGER_GRPC_PORT=7001
 export MANAGER_LOG_LEVEL=info
 export MANAGER_QEMU_ENABLE_DISK=true
 export MANAGER_QEMU_SRC_DISK_FILE=/path/to/enc_os.qcow2
-export MANAGER_QEMU_DISK_IMG_KERNEL_FILE=/path/to/fde/bzImage
-export MANAGER_QEMU_DISK_IMG_ROOTFS_FILE=/path/to/fde/rootfs.cpio.gz
-export MANAGER_QEMU_KERNEL_CMDLINE="quiet console=null src_ip=<NBD_SOURCE_IP> src_port=10809"
 ```
 
 ## QEMU Configuration and Management
@@ -380,12 +392,17 @@ The Manager dynamically constructs QEMU command-line arguments based on environm
 
 #### Storage and Boot
 
-- **Kernel Loading**: Direct kernel loading with bzImage
-- **InitRD**: Root filesystem loading via initramfs
+- **Kernel Loading**: Direct kernel loading with bzImage when disk mode is
+  disabled
+- **InitRD**: Root filesystem loading via initramfs when disk mode is disabled
 - **OVMF Integration**: UEFI firmware support for secure boot
-- **Optional Writable Disk**: Can attach a per-VM qcow2 destination disk through virtio-scsi
-- **FDE Early Boot**: In FDE mode, the initramfs installs and switches into an encrypted LUKS2 root filesystem before the guest OS continues booting
-- **Runtime-Specific Sizing**: The Manager sizes each writable destination disk from a reference image and adds extra space for LUKS metadata
+- **Optional Disk Boot**: Can attach a per-VM qcow2 disk through virtio-scsi
+  and boot from it
+- **Disk-Backed Early Boot**: In disk mode, the guest initramfs mounts the real
+  root filesystem read-only, provisions encrypted `/cocos`, and then continues
+  into the installed system
+- **Runtime-Specific Sizing**: The Manager sizes each runtime disk from a
+  reference image and adds extra space
 
 #### Networking
 
@@ -403,7 +420,9 @@ The Manager dynamically constructs QEMU command-line arguments based on environm
 
 The Manager uses Plan 9 Filesystem (9P) to securely transfer data between host and CVM:
 
-9P is used for configuration handoff such as certificates and environment files. It is separate from the FDE storage path, where the writable destination disk is attached as a block device instead of being shared through 9P.
+9P is used for configuration handoff such as certificates and environment
+files. It is separate from the disk-backed storage path, where the runtime disk
+is attached as a block device instead of being shared through 9P.
 
 #### Certificate Sharing
 
@@ -521,7 +540,7 @@ MANAGER_QEMU_OVMF_FILE=/path/to/tdx/OVMF.fd \
 ./build/cocos-manager
 ```
 
-#### FDE Deployment
+#### Disk-Backed Deployment
 
 ```bash
 MANAGER_GRPC_HOST=localhost \
@@ -529,13 +548,12 @@ MANAGER_GRPC_PORT=7002 \
 MANAGER_LOG_LEVEL=debug \
 MANAGER_QEMU_ENABLE_DISK=true \
 MANAGER_QEMU_SRC_DISK_FILE=/path/to/enc_os.qcow2 \
-MANAGER_QEMU_DISK_IMG_KERNEL_FILE=/path/to/fde/bzImage \
-MANAGER_QEMU_DISK_IMG_ROOTFS_FILE=/path/to/fde/rootfs.cpio.gz \
-MANAGER_QEMU_KERNEL_CMDLINE="quiet console=null src_ip=<NBD_SOURCE_IP> src_port=10809" \
 ./build/cocos-manager
 ```
 
-This FDE example can be combined with either SEV-SNP or TDX settings. The Manager is responsible for provisioning the writable destination disk, while the early FDE initramfs handles copying the trusted source image into the encrypted LUKS2 volume.
+This disk-backed example can be combined with either SEV-SNP or TDX settings.
+The Manager is responsible for provisioning the runtime disk, while the guest
+boot chain handles EFI boot, early initramfs setup, and `/cocos` provisioning.
 
 #### SystemD Service Deployment
 
@@ -638,11 +656,18 @@ export MANAGER_QEMU_MEMORY_SLOTS=8
 
 #### Storage Configuration
 
-Ensure HAL components are accessible
+For direct kernel boot:
 
 ```bash
 export MANAGER_QEMU_DISK_IMG_KERNEL_FILE=img/bzImage
 export MANAGER_QEMU_DISK_IMG_ROOTFS_FILE=img/rootfs.cpio.gz
+```
+
+For disk-backed boot:
+
+```bash
+export MANAGER_QEMU_ENABLE_DISK=true
+export MANAGER_QEMU_SRC_DISK_FILE=img/enc_os.qcow2
 ```
 
 ### Network Management
