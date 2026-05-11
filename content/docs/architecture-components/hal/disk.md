@@ -202,3 +202,125 @@ The HAL build produces:
 
 These artifacts come from the disk HAL Buildroot workflow under `cocos/hal/disk`
 rather than the older `cloud-init`-based source-image copy flow.
+
+## Build Instructions
+
+The disk-backed HAL is implemented as a Buildroot external tree rooted at
+`cocos/hal/disk`.
+
+To build the image:
+
+1. clone or open a [Buildroot](https://github.com/buildroot/buildroot) checkout
+2. point Buildroot at the Cocos disk [HAL](https://github.com/ultravioletrs/cocos/tree/main/hal/disk) external tree
+3. load the `cocos_defconfig`
+4. build the image
+
+Steps:
+
+```bash
+git clone https://github.com/ultravioletrs/cocos.git
+git clone https://github.com/buildroot/buildroot.git
+
+
+cd buildroot
+git checkout 2025.11
+
+make BR2_EXTERNAL=../cocos/hal/disk cocos_defconfig
+# Execute 'make menuconfig' only if you want to make additional configuration changes to Buildroot.
+make menuconfig
+make
+```
+
+The main output is:
+
+```bash
+/path/to/buildroot/output/images/disk.img
+```
+
+Additional generated artifacts include:
+
+```bash
+/path/to/buildroot/output/images/rootfs.ext4
+/path/to/buildroot/output/images/rootfs.verity
+/path/to/buildroot/output/images/rootfs.roothash
+/path/to/buildroot/output/images/rootfs.cpio.gz
+```
+
+## Launch Examples
+
+The disk-backed HAL boots from the disk image through firmware:
+
+- firmware loads GRUB from the EFI partition
+- GRUB loads the kernel and initramfs
+- the initramfs verifies the root filesystem with dm-verity and provisions
+  `/cocos`
+
+The following examples mirror the style used in [On-premises](./hal.md), but
+they use disk boot instead of direct `-kernel` / `-initrd` boot.
+
+### AMD SEV-SNP
+
+```bash
+DISK=/path/to/buildroot/output/images/disk.img
+IGVM=/path/to/coconut-qemu.igvm
+ENV_PATH=/path/to/env_directory
+CERT_PATH=/path/to/cert_directory
+
+sudo qemu-system-x86_64 \
+    -enable-kvm \
+    -cpu EPYC-v4 \
+    -machine q35 \
+    -smp 16,sockets=1,threads=1 \
+    -m 8G,slots=5,maxmem=40G \
+    -netdev user,id=vmnic,hostfwd=tcp::7020-:7002 \
+    -device virtio-net-pci,disable-legacy=on,iommu_platform=true,netdev=vmnic,romfile= \
+    -machine confidential-guest-support=sev0,memory-backend=ram1,igvm-cfg=igvm0 \
+    -object memory-backend-memfd,id=ram1,size=8G,share=true,prealloc=false,reserve=false \
+    -object sev-snp-guest,id=sev0,cbitpos=51,reduced-phys-bits=1 \
+    -drive file=$DISK,if=none,id=disk0,format=raw \
+    -device virtio-scsi-pci,id=scsi0,disable-legacy=on,iommu_platform=true \
+    -device scsi-hd,drive=disk0,bus=scsi0.0 \
+    -object igvm-cfg,id=igvm0,file=$IGVM \
+    -nographic \
+    -monitor pty \
+    -monitor unix:monitor,server,nowait \
+    -fsdev local,id=env_fs,path=$ENV_PATH,security_model=mapped \
+    -device virtio-9p-pci,disable-legacy=on,iommu_platform=true,fsdev=env_fs,mount_tag=env_share,romfile= \
+    -fsdev local,id=cert_fs,path=$CERT_PATH,security_model=mapped \
+    -device virtio-9p-pci,disable-legacy=on,iommu_platform=true,fsdev=cert_fs,mount_tag=certs_share,romfile=
+```
+
+### Intel TDX
+
+```bash
+DISK=/path/to/buildroot/output/images/disk.img
+OVMF=/path/to/OVMF.fd
+ENV_PATH=/path/to/env_directory
+CERT_PATH=/path/to/cert_directory
+
+sudo qemu-system-x86_64 \
+    -enable-kvm \
+    -m 8G \
+    -smp cores=16,sockets=1,threads=1 \
+    -cpu host \
+    -object '{"qom-type":"tdx-guest","id":"tdx","quote-generation-socket":{"type":"vsock","cid":"2","port":"4050"}}' \
+    -machine q35,kernel_irqchip=split,confidential-guest-support=tdx,memory-backend=mem0,hpet=off \
+    -bios $OVMF \
+    -nographic \
+    -nodefaults \
+    -no-reboot \
+    -serial mon:stdio \
+    -device virtio-net-pci,disable-legacy=on,iommu_platform=true,netdev=nic0_td,romfile= \
+    -netdev user,id=nic0_td,hostfwd=tcp::7020-:7002 \
+    -object memory-backend-memfd,id=mem0,size=8G \
+    -drive file=$DISK,if=none,id=disk0,format=raw \
+    -device virtio-scsi-pci,id=scsi0,disable-legacy=on,iommu_platform=true \
+    -device scsi-hd,drive=disk0,bus=scsi0.0 \
+    -device vhost-vsock-pci,guest-cid=6 \
+    -monitor pty \
+    -monitor unix:monitor,server,nowait \
+    -fsdev local,id=env_fs,path=$ENV_PATH,security_model=mapped \
+    -device virtio-9p-pci,disable-legacy=on,iommu_platform=true,fsdev=env_fs,mount_tag=env_share,romfile= \
+    -fsdev local,id=cert_fs,path=$CERT_PATH,security_model=mapped \
+    -device virtio-9p-pci,disable-legacy=on,iommu_platform=true,fsdev=cert_fs,mount_tag=certs_share,romfile=
+```

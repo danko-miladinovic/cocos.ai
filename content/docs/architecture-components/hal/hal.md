@@ -50,6 +50,41 @@ HAL is made using the tool Buildroot. Buildroot is used to create efficient, emb
 
 HAL configuration for Buildroot also includes Python, WASM, and Docker runtime and the Agent software support. You can read more about the [Agent software](agent.md).
 
+### Build Instructions
+
+The RAM-backed HAL is implemented as a Buildroot external tree rooted at
+`cocos/hal/linux`.
+
+To build the image:
+
+1. clone or open a [Buildroot](https://github.com/buildroot/buildroot) checkout
+2. point Buildroot at the Cocos linux [HAL](https://github.com/ultravioletrs/cocos/tree/main/hal/linux) external tree
+3. load the `cocos_defconfig`
+4. build the image
+
+Steps:
+
+```bash
+git clone https://github.com/ultravioletrs/cocos.git
+git clone https://github.com/buildroot/buildroot.git
+
+
+cd buildroot
+git checkout 2025.11
+
+make BR2_EXTERNAL=../cocos/hal/linux cocos_defconfig
+# Execute 'make menuconfig' only if you want to make additional configuration changes to Buildroot.
+make menuconfig
+make
+```
+
+The main output is:
+
+```bash
+/path/to/buildroot/output/images/bzImage
+/path/to/buildroot/output/images/rootfs.cpio.gz
+```
+
 ## How does it work?
 
 HAL is combined with AMD SEV-SNP or Intel TDX to provide a fully encrypted VM that can be verified using remote attestation. You can read more about the [attestation process](attestation-introduction.mdx).
